@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import path from 'path';
+import mammoth from 'mammoth';
 
 dotenv.config();
 
@@ -175,62 +176,241 @@ Input Text:
 """${cleanText}"""
 `;
 
-    // Tier 1: Try gemini-3.8-flash, Tier 2: gemini-3.1-flash-lite, Tier 3: offline technical dictionary
+    // Resilient model invocation with automatic retry on 503/429 and seamless model failover
     const modelsToTry = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
-    let succeeded = false;
+    let parsedData: any = null;
 
     for (const model of modelsToTry) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: domainPrompt,
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0.2,
-          },
-        });
-
-        const responseText = response.text || '{}';
-        let parsedData: any = {};
+      if (parsedData) break;
+      for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          parsedData = JSON.parse(responseText);
-        } catch (e) {
-          parsedData = {
-            translatedText: responseText.replace(/```json/g, '').replace(/```/g, '').trim(),
-            detectedTerms: [],
-            technicalHighlights: [],
-          };
+          const response = await ai.models.generateContent({
+            model,
+            contents: domainPrompt,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.2,
+            },
+          });
+
+          const responseText = response.text || '{}';
+          try {
+            parsedData = JSON.parse(responseText);
+          } catch {
+            parsedData = {
+              translatedText: responseText.replace(/```json/g, '').replace(/```/g, '').trim(),
+              detectedTerms: [],
+              technicalHighlights: [],
+            };
+          }
+          break; // Succeeded
+        } catch (err: any) {
+          const status = err?.status || err?.statusCode || 0;
+          const isTransient = status === 503 || status === 429 || status === 500;
+          if (isTransient && attempt < 2) {
+            await new Promise((r) => setTimeout(r, 250));
+            continue;
+          }
+          break; // Switch to next model
         }
-
-        const latencyMs = Date.now() - startTime;
-        const resultPayload = {
-          translatedText: parsedData.translatedText || cleanText,
-          detectedTerms: parsedData.detectedTerms || [],
-          technicalHighlights: parsedData.technicalHighlights || [],
-          latencyMs,
-        };
-
-        translationCache.set(cacheKey, resultPayload);
-        res.json(resultPayload);
-        succeeded = true;
-        break;
-      } catch (err: any) {
-        console.warn(`Model ${model} translation error:`, err?.status || err?.message);
-        // Continue to next model or fallback
       }
     }
 
-    if (!succeeded) {
-      // High-precision offline fallback translation
-      const fallbackTranslation = fallbackTechnicalTranslate(cleanText, sourceLang, targetLang);
-      const fallbackPayload = {
-        translatedText: fallbackTranslation,
-        detectedTerms: [],
-        technicalHighlights: ['Offline technical engine'],
-        latencyMs: Date.now() - startTime,
+    if (parsedData && parsedData.translatedText) {
+      const latencyMs = Date.now() - startTime;
+      const resultPayload = {
+        translatedText: parsedData.translatedText,
+        detectedTerms: parsedData.detectedTerms || [],
+        technicalHighlights: parsedData.technicalHighlights || [],
+        latencyMs,
       };
-      translationCache.set(cacheKey, fallbackPayload);
-      res.json(fallbackPayload);
+      translationCache.set(cacheKey, resultPayload);
+      res.json(resultPayload);
+      return;
+    }
+
+    // High-precision offline fallback translation
+    const fallbackTranslation = fallbackTechnicalTranslate(cleanText, sourceLang, targetLang);
+    const fallbackPayload = {
+      translatedText: fallbackTranslation,
+      detectedTerms: [],
+      technicalHighlights: ['Offline technical engine'],
+      latencyMs: Date.now() - startTime,
+    };
+    translationCache.set(cacheKey, fallbackPayload);
+    res.json(fallbackPayload);
+  });
+
+  // Ultra-Fast Translation Endpoint (Raw Text Output, Minimal Latency)
+  app.post('/api/translate-fast', async (req: Request, res: Response) => {
+    const startTime = Date.now();
+    const { text, sourceLang = 'en', targetLang = 'vi' } = req.body;
+
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      res.status(400).json({ error: 'Text is required' });
+      return;
+    }
+
+    const clean = text.trim();
+    const cacheKey = `fast:${sourceLang}->${targetLang}:${clean}`;
+    if (translationCache.has(cacheKey)) {
+      res.json({ translatedText: translationCache.get(cacheKey), latencyMs: Date.now() - startTime });
+      return;
+    }
+
+    const prompt = `You are an expert technical translator for the petrochemical, lubricants, and chemical manufacturing industry.
+Translate the following sentence from ${sourceLang.toUpperCase()} to ${targetLang.toUpperCase()}.
+Preserve terms, chemical formulas, and test standards (ZDDP, PAO, HTHS, ASTM, KV40, KV100, API SP, ILSAC).
+Return ONLY the raw translation string with NO quotes, NO markdown wrappers, and NO additional commentary:
+
+${clean}`;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents: prompt,
+        config: {
+          temperature: 0.1,
+          maxOutputTokens: 600,
+        },
+      });
+
+      const translatedText = (response.text || '').trim();
+      if (translatedText) {
+        translationCache.set(cacheKey, translatedText);
+        res.json({ translatedText, latencyMs: Date.now() - startTime });
+        return;
+      }
+    } catch (e) {
+      console.warn('Fast translation fallback triggered:', e);
+    }
+
+    const fallback = fallbackTechnicalTranslate(clean, sourceLang, targetLang);
+    translationCache.set(cacheKey, fallback);
+    res.json({ translatedText: fallback, latencyMs: Date.now() - startTime });
+  });
+
+  // Parallel Batch Translation Endpoint (For speeding up document paragraphs)
+  app.post('/api/translate-batch', async (req: Request, res: Response) => {
+    const startTime = Date.now();
+    const { texts = [], sourceLang = 'en', targetLang = 'vi' } = req.body;
+
+    if (!Array.isArray(texts) || texts.length === 0) {
+      res.status(400).json({ error: 'texts array required' });
+      return;
+    }
+
+    const promises = texts.map(async (t: string) => {
+      if (!t || !t.trim()) return '';
+      const clean = t.trim();
+      const cacheKey = `fast:${sourceLang}->${targetLang}:${clean}`;
+      if (translationCache.has(cacheKey)) {
+        return translationCache.get(cacheKey);
+      }
+
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents: `Translate this technical text from ${sourceLang} to ${targetLang}. Preserve ZDDP, PAO, ASTM standards, numbers, and formulas. Return ONLY the translated text:\n\n${clean}`,
+          config: {
+            temperature: 0.1,
+            maxOutputTokens: 800,
+          },
+        });
+        const resText = (response.text || '').trim();
+        if (resText) {
+          translationCache.set(cacheKey, resText);
+          return resText;
+        }
+      } catch (err) {
+        // fallback
+      }
+      return fallbackTechnicalTranslate(clean, sourceLang, targetLang);
+    });
+
+    const results = await Promise.all(promises);
+    res.json({ translations: results, latencyMs: Date.now() - startTime });
+  });
+
+  // File Translation Endpoint (PDF, DOCX, TXT, CSV, MD)
+  app.post('/api/translate-file', async (req: Request, res: Response) => {
+    const startTime = Date.now();
+    const { fileBase64, mimeType = '', fileName = '', sourceLang = 'en', targetLang = 'vi' } = req.body;
+
+    if (!fileBase64) {
+      res.status(400).json({ error: 'fileBase64 required' });
+      return;
+    }
+
+    try {
+      const buffer = Buffer.from(fileBase64, 'base64');
+      const isPdf = mimeType.includes('pdf') || fileName.toLowerCase().endsWith('.pdf');
+      const isDocx = mimeType.includes('word') || mimeType.includes('officedocument') || fileName.toLowerCase().endsWith('.docx');
+
+      let originalText = '';
+      let translatedText = '';
+
+      if (isPdf) {
+        // Multimodal PDF parsing and translation via Gemini
+        const pdfPrompt = `You are a high-level petrochemical, lubricants, and chemical engineering translator.
+Translate this complete document from ${sourceLang.toUpperCase()} to ${targetLang.toUpperCase()}.
+Formatting rules:
+- Preserve all tables, headers, section numbering, and technical data sheets (TDS/SDS) layouts.
+- Accurately translate and standardize technical terms: Base Oil Groups I-V, ZDDP, PAO, HTHS, ASTM D445/D2270/D4172, API SP/CK-4, ILSAC GF-6, KV40, KV100, Viscosity Index, TBN, TAN, etc.
+- Return the full translated document with clean Markdown headings and tables.`;
+
+        try {
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: [
+              {
+                inlineData: {
+                  data: fileBase64,
+                  mimeType: 'application/pdf',
+                },
+              },
+              {
+                text: pdfPrompt,
+              },
+            ],
+          });
+          translatedText = response.text || '';
+          originalText = `[Nội dung tài liệu PDF: ${fileName}]`;
+        } catch (pdfErr: any) {
+          console.error('PDF translation error:', pdfErr);
+          throw new Error('Không thể dịch tệp PDF trực tiếp: ' + (pdfErr?.message || 'Gemini error'));
+        }
+      } else if (isDocx) {
+        // Extract raw text from Word document using mammoth
+        const mammothResult = await mammoth.extractRawText({ buffer });
+        originalText = mammothResult.value;
+
+        // Translate extracted text
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: `Translate this technical Word document from ${sourceLang.toUpperCase()} to ${targetLang.toUpperCase()}. Preserve all chemical formulas, ASTM standards, ratios, and technical terms:\n\n${originalText}`,
+        });
+        translatedText = response.text || '';
+      } else {
+        // Plain text, CSV, or Markdown
+        originalText = buffer.toString('utf-8');
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: `Translate this technical file from ${sourceLang.toUpperCase()} to ${targetLang.toUpperCase()}. Preserve formatting, tables, ASTM standards, and chemical terms:\n\n${originalText}`,
+        });
+        translatedText = response.text || '';
+      }
+
+      res.json({
+        fileName,
+        fileType: isPdf ? 'PDF' : isDocx ? 'DOCX' : 'TEXT',
+        originalText: originalText.slice(0, 5000),
+        translatedText,
+        latencyMs: Date.now() - startTime,
+      });
+    } catch (err: any) {
+      console.error('File translation error:', err);
+      res.status(500).json({ error: err?.message || 'Lỗi xử lý và dịch tệp tin.' });
     }
   });
 
@@ -324,21 +504,40 @@ Produce a comprehensive technical synthesis in JSON format:
 }
 `;
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.25,
-        },
-      });
+    const analysisModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash'];
+    let parsed: any = null;
 
-      const parsed = JSON.parse(response.text || '{}');
+    for (const model of analysisModels) {
+      if (parsed) break;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.25,
+            },
+          });
+
+          parsed = JSON.parse(response.text || '{}');
+          break;
+        } catch (error: any) {
+          const status = error?.status || error?.statusCode || 0;
+          if ((status === 503 || status === 429 || status === 500) && attempt < 2) {
+            await new Promise((r) => setTimeout(r, 250));
+            continue;
+          }
+          break;
+        }
+      }
+    }
+
+    if (parsed && parsed.topic) {
       analysisCache.set(cleanTranscript, parsed);
       res.json(parsed);
-    } catch (error: any) {
-      console.warn('Meeting analysis API error, using structured fallback:', error?.message);
+      return;
+    }
       // High-quality structured fallback synthesis
       const fallbackSummary = {
         topic: "Công nghệ Phối trộn Dầu Động cơ Tổng hợp SAE 0W-20 & Hóa học Phụ gia ZDDP",
@@ -367,7 +566,6 @@ Produce a comprehensive technical synthesis in JSON format:
         ]
       };
       res.json(fallbackSummary);
-    }
   });
 
   // Mount Vite middleware in development or serve static in production

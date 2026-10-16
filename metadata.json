@@ -2,5 +2,7 @@
   "name": "PetroTrans Pro - AI Realtime Technical & Meeting Interpreter",
   "description": "Hệ thống dịch thuật chuyên nghiệp đa ngôn ngữ thời gian thực, tích hợp AI dịch cuộc họp live độ trễ cực thấp, tối ưu cho diễn giả nói nhanh và chuyên sâu ngành dầu nhớt, hóa chất, phối trộn.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

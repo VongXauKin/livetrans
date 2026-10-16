@@ -25,6 +25,18 @@ export interface TranslationChunk {
   confidence?: number;
 }
 
+export interface SavedMeetingSession {
+  id: string;
+  title: string;
+  timestamp: string;
+  dateStr: string;
+  chunks: TranslationChunk[];
+  averageWpm: number;
+  detectedTerms: string[];
+  sourceLang: SupportedLanguage;
+  targetLang: SupportedLanguage;
+}
+
 export interface MeetingSummary {
   topic: string;
   summaryVi: string;
@@ -54,4 +66,5 @@ export interface TranslationConfig {
   autoTtsOutput: boolean;
   ttsSpeed: number;
   customTerms: IndustryTerm[];
+  mobileViewMode?: 'bilingual_cards' | 'split_panes' | 'target_only';
 }

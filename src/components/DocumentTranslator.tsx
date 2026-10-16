@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { 
   FileText, 
   ArrowRightLeft, 
@@ -10,7 +10,13 @@ import {
   RotateCcw,
   BookOpen,
   Sliders,
-  AlertTriangle
+  AlertTriangle,
+  Upload,
+  FileCode,
+  Zap,
+  Printer,
+  Clock,
+  Layers
 } from 'lucide-react';
 import { TranslationConfig, IndustryTerm } from '../types/index.ts';
 import { matchAndDetectTerms } from '../utils/textProcessor.ts';
@@ -24,7 +30,7 @@ interface DocumentTranslatorProps {
 const SAMPLE_DOCUMENTS = [
   {
     id: 'tds-0w20',
-    title: 'TDS: Dầu Động Cơ Tổng Hợp Cao Cấp SAE 0W-20 API SP',
+    title: 'TDS: Dầu Động Cơ SAE 0W-20 API SP',
     content: `TECHNICAL DATA SHEET: ULTRA-SYNTHETIC MOTOR OIL SAE 0W-20 API SP / ILSAC GF-6A
 
 1. Product Description:
@@ -46,7 +52,7 @@ Charge Group III+ base oil at 55°C into the automated batch blending kettle. In
   },
   {
     id: 'blend-mwf',
-    title: 'Công Thức Phối Trộn: Dầu Gia Công Kim Loại & Nhũ Tương Cắt Gọt',
+    title: 'Công Thức Phối Trộn: Dầu Cắt Gọt Kim Loại',
     content: `BATCH BLENDING MASTER SHEET: SEMI-SYNTHETIC METALWORKING FLUID 5000L
 
 1. Formulation Breakdown (% by weight):
@@ -79,30 +85,151 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
   const [detectedTerms, setDetectedTerms] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
   const [highlights, setHighlights] = useState<string[]>([]);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
 
-  const handleTranslate = async () => {
+  // File Upload state
+  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [uploadedFileSize, setUploadedFileSize] = useState<string | null>(null);
+  const [uploadedFileBase64, setUploadedFileBase64] = useState<string | null>(null);
+  const [uploadedFileMime, setUploadedFileMime] = useState<string>('');
+  const [isFileMode, setIsFileMode] = useState<boolean>(false);
+  const [progressMsg, setProgressMsg] = useState<string>('');
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Handle local file selection
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadedFileName(file.name);
+    setUploadedFileSize(`${(file.size / 1024).toFixed(1)} KB`);
+    setUploadedFileMime(file.type || 'application/octet-stream');
+    setIsFileMode(true);
+
+    const reader = new FileReader();
+
+    if (file.name.toLowerCase().endsWith('.txt') || 
+        file.name.toLowerCase().endsWith('.csv') || 
+        file.name.toLowerCase().endsWith('.md') ||
+        file.name.toLowerCase().endsWith('.json')) {
+      // Plain text file: read directly into sourceText
+      reader.onload = (event) => {
+        const text = event.target?.result as string;
+        setSourceText(text || '');
+        setTranslatedText('');
+      };
+      reader.readAsText(file);
+    } else {
+      // PDF or DOCX binary: convert to base64
+      reader.onload = (event) => {
+        const result = event.target?.result as string;
+        const base64 = result.split(',')[1] || result;
+        setUploadedFileBase64(base64);
+        setSourceText(`[Đã tải lên tệp ${file.name} (${(file.size / 1024).toFixed(1)} KB)]\nNhấn "Dịch Tệp Tin Siêu Tốc" để AI phân tích và dịch trực tiếp toàn bộ tài liệu.`);
+        setTranslatedText('');
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Turbo Parallel Batch Translation
+  const handleTranslateTurbo = async () => {
     if (!sourceText.trim()) return;
 
     setIsLoading(true);
-    setTranslatedText('Đang phân tích cấu trúc kỹ thuật và dịch chuyên sâu...');
+    const start = Date.now();
+
+    // Check if we have an uploaded PDF or DOCX file to translate directly
+    if (isFileMode && uploadedFileBase64 && (uploadedFileName?.toLowerCase().endsWith('.pdf') || uploadedFileName?.toLowerCase().endsWith('.docx'))) {
+      setProgressMsg(`Đang dịch tệp ${uploadedFileName} đa phương thức...`);
+      try {
+        const res = await fetch('/api/translate-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileBase64: uploadedFileBase64,
+            mimeType: uploadedFileMime,
+            fileName: uploadedFileName,
+            sourceLang: config.sourceLang,
+            targetLang: config.targetLang,
+          }),
+        });
+
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        setTranslatedText(data.translatedText || '');
+        setLatencyMs(Date.now() - start);
+        const detected = matchAndDetectTerms(data.translatedText, config.customTerms);
+        setDetectedTerms(detected);
+      } catch (err: any) {
+        console.error('File translation failed:', err);
+        setTranslatedText(`Lỗi khi dịch tệp: ${err?.message || 'Vui lòng thử lại.'}`);
+      } finally {
+        setIsLoading(false);
+        setProgressMsg('');
+      }
+      return;
+    }
+
+    // High-Speed Parallel Batch text translation
+    // Split document into paragraphs to translate concurrently
+    const paragraphs = sourceText.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+
+    if (paragraphs.length > 1) {
+      setProgressMsg(`Đang tăng tốc dịch song song ${paragraphs.length} phân đoạn...`);
+      try {
+        const res = await fetch('/api/translate-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            texts: paragraphs,
+            sourceLang: config.sourceLang,
+            targetLang: config.targetLang,
+          }),
+        });
+
+        const data = await res.json();
+        if (data.translations && Array.isArray(data.translations)) {
+          setTranslatedText(data.translations.join('\n\n'));
+          setLatencyMs(Date.now() - start);
+          const detected = matchAndDetectTerms(sourceText, config.customTerms);
+          setDetectedTerms(detected);
+        } else {
+          throw new Error('Invalid batch translation output');
+        }
+      } catch (e) {
+        // Fallback to standard fast translate
+        await handleTranslateStandard();
+      } finally {
+        setIsLoading(false);
+        setProgressMsg('');
+      }
+    } else {
+      await handleTranslateStandard();
+    }
+  };
+
+  const handleTranslateStandard = async () => {
+    setIsLoading(true);
+    const start = Date.now();
+    setProgressMsg('Đang dịch thuật AI siêu tốc...');
 
     try {
-      const res = await fetch('/api/translate', {
+      const res = await fetch('/api/translate-fast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: sourceText,
           sourceLang: config.sourceLang,
           targetLang: config.targetLang,
-          domain: config.domainPreset,
-          customGlossary: config.customTerms,
-          isFastSpokenChunk: false,
         }),
       });
 
       const data = await res.json();
       setTranslatedText(data.translatedText || '');
-      setHighlights(data.technicalHighlights || []);
+      setLatencyMs(Date.now() - start);
 
       const detected = matchAndDetectTerms(sourceText, config.customTerms);
       setDetectedTerms(detected);
@@ -111,6 +238,7 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
       setTranslatedText('Có lỗi xảy ra trong quá trình dịch thuật. Vui lòng thử lại.');
     } finally {
       setIsLoading(false);
+      setProgressMsg('');
     }
   };
 
@@ -126,29 +254,87 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `PetroTrans-Translated-Doc-${Date.now()}.txt`;
+    a.download = `Ban-Dich-Ky-Thuat-${Date.now()}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
+  const downloadPrintPDF = () => {
+    if (!translatedText) return;
+    const win = window.open('', '_blank');
+    if (win) {
+      win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Bản Dịch Kỹ Thuật PetroTrans Pro</title><style>body{font-family:Arial,sans-serif;padding:30px;line-height:1.6;color:#1e293b;max-width:850px;margin:auto;}h1{color:#0284c7;border-bottom:2px solid #0284c7;padding-bottom:10px;font-size:20px;}pre{white-space:pre-wrap;font-family:inherit;font-size:13px;}</style></head><body><h1>BẢN DỊCH TÀI LIỆU KỸ THUẬT & CÔNG THỨC DẦU NHỚT</h1><p style="color:#64748b;font-size:12px;">Xuất bản: ${new Date().toLocaleString('vi-VN')} &bull; Hệ thống PetroTrans Pro AI</p><hr/><pre>${translatedText}</pre></body></html>`);
+      win.document.close();
+      win.focus();
+      setTimeout(() => win.print(), 500);
+    }
+  };
+
   return (
     <div className="space-y-4">
-      {/* Sample presets selector */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <BookOpen className="w-4 h-4 text-cyan-400" />
-          <span className="text-xs font-bold text-slate-300">Tài liệu mẫu chuyên ngành dầu nhớt & hóa chất:</span>
+      {/* Top File Upload & Preset Toolbar */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <BookOpen className="w-4 h-4 text-cyan-400" />
+            <span className="text-xs font-bold text-slate-200">Chọn tài liệu mẫu hoặc Tải lên Tệp tin (PDF, DOCX, TXT):</span>
+          </div>
+
+          {/* Hidden File Input */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileChange}
+            accept=".pdf,.docx,.doc,.txt,.csv,.md,.json"
+            className="hidden"
+          />
+
+          {/* Upload Button */}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-slate-950 hover:bg-slate-850 border border-cyan-800 text-cyan-300 hover:text-white text-xs font-bold transition-all shadow-sm cursor-pointer"
+          >
+            <Upload className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Tải Lên Tệp (PDF / DOCX / TXT)</span>
+          </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        {/* Uploaded File Badge */}
+        {uploadedFileName && (
+          <div className="flex items-center justify-between p-2.5 rounded-xl bg-cyan-950/40 border border-cyan-800/60 text-xs">
+            <div className="flex items-center gap-2 text-cyan-300">
+              <FileCode className="w-4 h-4 text-cyan-400" />
+              <span className="font-semibold">{uploadedFileName}</span>
+              <span className="text-[11px] text-slate-400 font-mono">({uploadedFileSize})</span>
+            </div>
+            <button
+              onClick={() => {
+                setUploadedFileName(null);
+                setUploadedFileBase64(null);
+                setIsFileMode(false);
+                setSourceText(SAMPLE_DOCUMENTS[0].content);
+              }}
+              className="text-slate-400 hover:text-rose-400 text-xs"
+            >
+              Hủy tệp
+            </button>
+          </div>
+        )}
+
+        {/* Sample Document Chips */}
+        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/80">
+          <span className="text-[11px] text-slate-400 font-medium mr-1">Tài liệu mẫu:</span>
           {SAMPLE_DOCUMENTS.map((doc) => (
             <button
               key={doc.id}
               onClick={() => {
+                setUploadedFileName(null);
+                setUploadedFileBase64(null);
+                setIsFileMode(false);
                 setSourceText(doc.content);
                 setTranslatedText('');
               }}
-              className="text-xs px-3 py-1.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition-all font-medium"
+              className="text-xs px-3 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition-all font-medium cursor-pointer"
             >
               {doc.title}
             </button>
@@ -169,8 +355,14 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
               </h2>
             </div>
             <button
-              onClick={() => setSourceText('')}
-              className="text-slate-500 hover:text-slate-300 text-xs flex items-center gap-1"
+              onClick={() => {
+                setSourceText('');
+                setTranslatedText('');
+                setUploadedFileName(null);
+                setUploadedFileBase64(null);
+                setIsFileMode(false);
+              }}
+              className="text-slate-500 hover:text-slate-300 text-xs flex items-center gap-1 cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" /> Xóa nội dung
             </button>
@@ -180,7 +372,7 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
             <textarea
               value={sourceText}
               onChange={(e) => setSourceText(e.target.value)}
-              placeholder="Dán tài liệu kỹ thuật, bảng dữ liệu TDS, SDS, công thức phối trộn hoặc kết quả kiểm nghiệm ASTM vào đây..."
+              placeholder="Dán tài liệu kỹ thuật, bảng dữ liệu TDS, SDS, công thức phối trộn hoặc kết quả kiểm nghiệm ASTM vào đây, hoặc nhấn Tải Lên Tệp ở trên..."
               className="w-full h-full bg-slate-950/80 border border-slate-800/90 rounded-xl p-3 text-slate-200 font-mono text-xs leading-relaxed resize-none focus:outline-none focus:ring-1 focus:ring-cyan-500 selection:bg-cyan-500 selection:text-white"
             />
           </div>
@@ -189,13 +381,14 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
             <span className="text-xs font-mono text-slate-400">
               Số từ: {sourceText.trim() ? sourceText.trim().split(/\s+/).length : 0} từ
             </span>
+
             <button
-              onClick={handleTranslate}
+              onClick={handleTranslateTurbo}
               disabled={isLoading || !sourceText.trim()}
-              className="flex items-center gap-2 px-5 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white text-xs font-bold transition-all shadow-md shadow-cyan-600/20"
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white text-xs font-bold transition-all shadow-md shadow-cyan-600/20 cursor-pointer"
             >
-              <Sparkles className="w-4 h-4" />
-              <span>{isLoading ? 'Đang dịch thuật AI...' : 'Dịch Chuyên Sâu Ngay'}</span>
+              <Zap className="w-4 h-4 fill-cyan-300 text-cyan-300" />
+              <span>{isLoading ? (progressMsg || 'Đang dịch siêu tốc...') : 'Dịch Siêu Tốc (Turbo Batch)'}</span>
             </button>
           </div>
         </div>
@@ -208,23 +401,37 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
                 Bản Dịch Chuyên Ngành ({config.targetLang.toUpperCase()})
               </h2>
+              {latencyMs && (
+                <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">
+                  {latencyMs}ms (Siêu Tốc)
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-2">
               {translatedText && (
                 <>
                   <button
                     onClick={copyToClipboard}
-                    className="flex items-center gap-1 text-slate-400 hover:text-slate-200 text-xs px-2 py-1 rounded bg-slate-800"
+                    className="flex items-center gap-1 text-slate-400 hover:text-slate-200 text-xs px-2 py-1 rounded bg-slate-800 cursor-pointer"
                   >
                     {copied ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                     <span>{copied ? 'Đã sao chép' : 'Sao chép'}</span>
                   </button>
                   <button
-                    onClick={downloadDocument}
-                    className="flex items-center gap-1 text-slate-400 hover:text-slate-200 text-xs px-2 py-1 rounded bg-slate-800"
+                    onClick={downloadPrintPDF}
+                    className="flex items-center gap-1 text-slate-300 hover:text-white text-xs px-2.5 py-1 rounded bg-slate-800 cursor-pointer"
+                    title="Xuất PDF"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Tải về</span>
+                    <Printer className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Xuất PDF</span>
+                  </button>
+                  <button
+                    onClick={downloadDocument}
+                    className="flex items-center gap-1 text-slate-300 hover:text-white text-xs px-2.5 py-1 rounded bg-slate-800 cursor-pointer"
+                    title="Tải văn bản thô"
+                  >
+                    <Download className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Tải .TXT</span>
                   </button>
                 </>
               )}
@@ -241,7 +448,7 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
                 <FileText className="w-10 h-10 text-slate-600 mb-3" />
                 <p className="font-medium text-slate-400">Bản dịch sẽ hiển thị ở đây</p>
                 <p className="text-xs text-slate-500 max-w-sm mt-1">
-                  Mô hình Gemini 3.8 Flash sẽ tự động định danh và chuẩn hóa các thông số kỹ thuật (cSt, TBN, ZDDP, HTHS, ASTM D445) với độ chính xác cao nhất.
+                  Mô hình Gemini 3.8 Flash & Gemini 3.1 Flash-Lite sẽ tự động định danh và chuẩn hóa các thông số kỹ thuật (cSt, TBN, ZDDP, HTHS, ASTM D445) với độ trễ thấp nhất.
                 </p>
               </div>
             )}
@@ -253,9 +460,16 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-[11px] text-slate-400 font-medium">Bảo toàn thuật ngữ:</span>
                 {detectedTerms.slice(0, 6).map((term, i) => (
-                  <span key={i} className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">
+                  <button
+                    key={i}
+                    onClick={() => {
+                      const found = config.customTerms.find(t => t.term.toLowerCase() === term.toLowerCase());
+                      if (found) onSelectTerm(found);
+                    }}
+                    className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 cursor-pointer hover:bg-cyan-900"
+                  >
                     {term}
-                  </span>
+                  </button>
                 ))}
               </div>
             ) : (
@@ -265,7 +479,7 @@ export const DocumentTranslator: React.FC<DocumentTranslatorProps> = ({
             {translatedText && (
               <button
                 onClick={() => onSendToAnalytics(translatedText)}
-                className="text-xs text-cyan-400 hover:text-cyan-300 font-semibold flex items-center gap-1"
+                className="text-xs text-cyan-400 hover:text-cyan-300 font-semibold flex items-center gap-1 cursor-pointer"
               >
                 <span>Bóc tách thông số sang Biên bản</span> &rarr;
               </button>
